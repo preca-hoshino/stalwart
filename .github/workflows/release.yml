@@ -157,7 +157,7 @@ jobs:
           tags: |
             type=ref,event=tag
             type=ref,event=branch,prefix=branch-
-            type=edge,branch=main
+            type=edge,branch=master
             type=semver,pattern=v{{major}}.{{minor}}
 
       - name: Build Artifact

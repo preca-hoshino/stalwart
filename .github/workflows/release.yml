@@ -79,7 +79,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Add swap (heavy ARM targets)
         if: contains(matrix.target, 'arm')
@@ -235,7 +235,7 @@ jobs:
           - target: x86_64-pc-windows-msvc
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Run sccache-cache
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -276,7 +276,7 @@ jobs:
           - target: x86_64-apple-darwin
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Run sccache-cache
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -394,7 +394,7 @@ jobs:
     steps:
       - name: Checkout (for CHANGELOG)
         if: startsWith(github.ref, 'refs/tags/')
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Download Artifacts
         uses: actions/download-artifact@v5

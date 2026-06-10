@@ -1,0 +1,13 @@
+/target
+*.failed
+*_failed
+run.sh
+.*
+!.gitignore
+!.gitattributes
+!.github
+
+# Translation tooling (not part of the release)
+__pycache__/
+glossary_review.json
+translate_schema.py

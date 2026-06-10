@@ -1,0 +1,520 @@
+# ============================================================
+# Stalwart — CI/CD (based on upstream ci.yml, minimal changes)
+# ============================================================
+# 基于原仓库 stalwartlabs/mail-server 的 CI workflow
+# 改动: 去除 DockerHub / cosign / attestation, 仅保留 GHCR
+# ============================================================
+
+name: CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      Docker:
+        required: false
+        default: false
+        type: boolean
+      Release:
+        required: false
+        default: false
+        type: boolean
+  push:
+    tags: ["v*"]
+
+env:
+  SCCACHE_GHA_ENABLED: true
+  RUSTC_WRAPPER: sccache
+  CARGO_TERM_COLOR: always
+  AWS_LC_SYS_PREBUILT_NASM: 1
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ============================================================
+  # Linux 构建 (Docker Buildx, 和原仓库一致)
+  # ============================================================
+  linux:
+    permissions:
+      contents: write
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            platform: linux/amd64
+            suffix: ""
+            build_env: ""
+          - target: x86_64-unknown-linux-musl
+            platform: linux/amd64
+            suffix: "-alpine"
+            build_env: ""
+          - target: aarch64-unknown-linux-gnu
+            platform: linux/arm64
+            suffix: ""
+            build_env: "JEMALLOC_SYS_WITH_LG_PAGE=16 "
+          - target: aarch64-unknown-linux-musl
+            platform: linux/arm64
+            suffix: "-alpine"
+            build_env: "JEMALLOC_SYS_WITH_LG_PAGE=16 "
+          - target: armv7-unknown-linux-gnueabihf
+            platform: linux/arm/v7
+            suffix: ""
+            build_env: "JEMALLOC_SYS_WITH_LG_PAGE=16 "
+          - target: armv7-unknown-linux-musleabihf
+            platform: linux/arm/v7
+            suffix: "-alpine"
+            build_env: "JEMALLOC_SYS_WITH_LG_PAGE=16 "
+          - target: arm-unknown-linux-gnueabihf
+            platform: linux/arm/v6
+            suffix: ""
+            build_env: ""
+          - target: arm-unknown-linux-musleabihf
+            platform: linux/arm/v6
+            suffix: "-alpine"
+            build_env: ""
+    name: Build / ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Add swap (heavy ARM targets)
+        if: contains(matrix.target, 'arm')
+        run: |
+          sudo fallocate -l 16G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+          sudo sysctl vm.swappiness=80
+          free -h
+          swapon --show
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: "arm64,arm"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver-opts: |
+            network=host
+
+      - name: Log In to GitHub Container Registry
+        id: ghcr-login
+        if: github.event_name == 'push' || inputs.Docker
+        continue-on-error: true
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retry GHCR Login (1/2)
+        id: ghcr-login-r1
+        if: steps.ghcr-login.outcome == 'failure'
+        continue-on-error: true
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retry GHCR Login (2/2)
+        if: steps.ghcr-login-r1.outcome == 'failure'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Calculate shasum of external deps
+        id: cal-dep-shasum
+        run: |
+          echo "checksum=$(yq -p toml -oy '.package[] | select((.source | contains("")) or (.checksum | contains("")))' Cargo.lock | sha256sum | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.target }}-cargo-${{ steps.cal-dep-shasum.outputs.checksum }}
+
+      - name: Extract Metadata for Docker
+        if: github.event_name == 'push' || inputs.Docker
+        uses: docker/metadata-action@v6
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            suffix=${{ matrix.suffix }},onlatest=true
+          tags: |
+            type=ref,event=tag
+            type=ref,event=branch,prefix=branch-
+            type=edge,branch=main
+            type=semver,pattern=v{{major}}.{{minor}}
+
+      - name: Build Artifact
+        id: bake
+        uses: docker/bake-action@v7
+        env:
+          TARGET: ${{ matrix.target }}
+          GHCR_REPO: ghcr.io/${{ github.repository }}
+          BUILD_ENV: ${{ matrix.build_env }}
+          DOCKER_PLATFORM: ${{ matrix.platform }}
+          SUFFIX: ${{ matrix.suffix }}
+        with:
+          source: .
+          set: |
+            *.tags=
+            image.output=type=image,"name=ghcr.io/${{ github.repository }}",push-by-digest=true,name-canonical=true,push=${{ (github.event_name == 'push' || inputs.Docker) && 'true' || 'false' }},compression=zstd,compression-level=9,force-compression=true,oci-mediatypes=true
+          files: |
+            docker-bake.hcl
+            ${{ steps.meta.outputs.bake-file }}
+          targets: ${{ (github.event_name == 'push' || inputs.Docker) && 'build,image' || 'build' }}
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: artifact-${{ matrix.target }}
+          path: |
+            artifact
+            !artifact/*.json
+
+      - name: Export digest & Rename meta bake definition file
+        if: (github.event_name == 'push' || inputs.Docker)
+        run: |
+          mv "${{ steps.meta.outputs.bake-file }}" "${{ runner.temp }}/bake-meta.json"
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ fromJSON(steps.bake.outputs.metadata).image['containerimage.digest'] }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        if: (github.event_name == 'push' || inputs.Docker)
+        uses: actions/upload-artifact@v5
+        with:
+          name: digests-${{ matrix.suffix == '' && 'gnu' || 'musl' }}-${{ matrix.target }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload GNU meta bake definition
+        uses: actions/upload-artifact@v5
+        if: (github.event_name == 'push' || inputs.Docker) && endsWith(matrix.target, 'gnu') && startsWith(matrix.target, 'x86')
+        with:
+          name: bake-meta-gnu
+          path: ${{ runner.temp }}/bake-meta.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload musl meta bake definition
+        uses: actions/upload-artifact@v5
+        if: (github.event_name == 'push' || inputs.Docker) && endsWith(matrix.target, 'musl') && startsWith(matrix.target, 'x86')
+        with:
+          name: bake-meta-musl
+          path: ${{ runner.temp }}/bake-meta.json
+          if-no-files-found: error
+          retention-days: 1
+
+  # ============================================================
+  # Windows 构建
+  # ============================================================
+  windows:
+    name: Build / ${{ matrix.target }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build --release --target ${{ matrix.target }} -p stalwart --no-default-features --features "sqlite postgres mysql rocks s3 redis azure nats enterprise"
+          mkdir -p artifacts
+          mv ./target/${{ matrix.target }}/release/stalwart.exe ./artifacts/stalwart.exe
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: artifact-${{ matrix.target }}
+          path: artifacts
+
+  # ============================================================
+  # macOS 构建
+  # ============================================================
+  macos:
+    name: Build / ${{ matrix.target }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+          - target: x86_64-apple-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: |
+          rustup target add ${{ matrix.target }}
+          cargo build --release --target ${{ matrix.target }} -p stalwart --no-default-features --features "sqlite postgres mysql rocks s3 redis azure nats enterprise"
+          mkdir -p artifacts
+          mv ./target/${{ matrix.target }}/release/stalwart ./artifacts/stalwart
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: artifact-${{ matrix.target }}
+          path: artifacts
+
+  # ============================================================
+  # Docker 多架构合并
+  # ============================================================
+  multiarch:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: gnu
+          - variant: musl
+    name: Merge image / ${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    needs: [linux]
+    if: github.event_name == 'push' || inputs.Docker
+    steps:
+      - name: Log In to GitHub Container Registry
+        id: ghcr-login-m
+        continue-on-error: true
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retry GHCR Login (1/2)
+        id: ghcr-login-m-r1
+        if: steps.ghcr-login-m.outcome == 'failure'
+        continue-on-error: true
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retry GHCR Login (2/2)
+        if: steps.ghcr-login-m-r1.outcome == 'failure'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download ${{ matrix.variant }} meta bake definition
+        uses: actions/download-artifact@v5
+        with:
+          name: bake-meta-${{ matrix.variant }}
+          path: ${{ runner.temp }}/${{ matrix.variant }}
+
+      - name: Download ${{ matrix.variant }} digests
+        uses: actions/download-artifact@v5
+        with:
+          path: ${{ runner.temp }}/${{ matrix.variant }}/digests
+          pattern: digests-${{ matrix.variant }}-*
+          merge-multiple: true
+
+      - name: Create ${{ matrix.variant }} manifest list and push
+        working-directory: ${{ runner.temp }}/${{ matrix.variant }}/digests
+        run: |
+          for i in 1 2 3; do
+            echo "imagetools create attempt $i/3 ..."
+            docker buildx imagetools create \
+              $(jq -cr '.target."docker-metadata-action".tags | map(select(startswith("ghcr.io/${{ github.repository }}")) | "-t " + .) | join(" ")' ${{ runner.temp }}/${{ matrix.variant }}/bake-meta.json) \
+              $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *) && exit 0
+            [ $i -lt 3 ] && { echo "::warning::imagetools create failed, retrying in 15s..."; sleep 15; } || exit 1
+          done
+
+      - name: Inspect ${{ matrix.variant }} image
+        run: |
+          for i in 1 2 3; do
+            echo "imagetools inspect attempt $i/3 ..."
+            docker buildx imagetools inspect \
+              ghcr.io/${{ github.repository }}:$(jq -r '.target."docker-metadata-action".args.DOCKER_META_VERSION' ${{ runner.temp }}/${{ matrix.variant }}/bake-meta.json) && exit 0
+            [ $i -lt 3 ] && { echo "::warning::imagetools inspect failed, retrying in 10s..."; sleep 10; } || exit 1
+          done
+
+  # ============================================================
+  # GitHub Release (格式对齐原仓库)
+  # ============================================================
+  release:
+    name: Release
+    permissions:
+      contents: write
+    if: github.event_name == 'push' || inputs.Release
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for CHANGELOG)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/checkout@v5
+
+      - name: Download Artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: archive
+          pattern: artifact-*
+
+      - name: Compress
+        run: |
+          set -eux
+          BASE_DIR="$(pwd)/archive"
+          compress_files() {
+              local dir="$1"
+              local archive_dir_name="${dir#artifact-}"
+              cd "$dir"
+              for file in $(ls); do
+                  filename="${file%.*}"
+                  extension="${file##*.}"
+                  if [ "$extension" = "exe" ]; then
+                      7z a -tzip "${filename}-${archive_dir_name}.zip" "$file" > /dev/null
+                  else
+                      tar -czf "${filename}-${archive_dir_name}.tar.gz" "$file"
+                  fi
+              done
+              cd "$BASE_DIR"
+          }
+          cd "$BASE_DIR"
+          for arch_dir in $(ls); do
+              dir_name=$(basename "$arch_dir")
+              compress_files "$dir_name"
+          done
+
+      - name: Build release body
+        run: |
+          if [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
+            awk '/^## \[/{c++} c==1' CHANGELOG.md > release_body.md
+            echo "" >> release_body.md
+          else
+            : > release_body.md
+          fi
+          cat >> release_body.md <<'EOF'
+          <hr />
+
+          > Enterprise features unlocked for personal use.
+          > Forked from [stalwartlabs/mail-server](https://github.com/stalwartlabs/mail-server).
+          EOF
+
+      - name: Create Release (draft)
+        id: release-create
+        continue-on-error: true
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            archive/**/*.tar.gz
+            archive/**/*.zip
+          draft: true
+          body_path: release_body.md
+
+      - name: Retry Create Release (1/2)
+        id: release-create-r1
+        if: steps.release-create.outcome == 'failure'
+        continue-on-error: true
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            archive/**/*.tar.gz
+            archive/**/*.zip
+          draft: true
+          body_path: release_body.md
+
+      - name: Retry Create Release (2/2)
+        if: steps.release-create-r1.outcome == 'failure'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            archive/**/*.tar.gz
+            archive/**/*.zip
+          draft: true
+          body_path: release_body.md
+
+  # ============================================================
+  # 发布 Release
+  # ============================================================
+  publish:
+    name: Publish release
+    needs: [linux, windows, macos, multiarch, release]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Un-draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in 1 2 3; do
+            echo "Un-drafting release attempt $i/3 ..."
+            gh release edit "${{ github.ref_name }}" \
+              --draft=false --latest --repo "${{ github.repository }}" && exit 0
+            [ $i -lt 3 ] && { echo "::warning::Un-draft failed, retrying in 15s..."; sleep 15; } || exit 1
+          done
+
+  # ============================================================
+  # 清理失败的 Release
+  # ============================================================
+  cleanup:
+    name: Cleanup failed release
+    needs: [linux, windows, macos, multiarch, release]
+    if: failure() && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Delete draft release and tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in 1 2 3; do
+            echo "Deleting release attempt $i/3 ..."
+            gh release delete "${{ github.ref_name }}" \
+              --yes --cleanup-tag --repo "${{ github.repository }}" && exit 0
+            [ $i -lt 3 ] && { echo "::warning::Delete failed, retrying in 10s..."; sleep 10; } || true
+          done

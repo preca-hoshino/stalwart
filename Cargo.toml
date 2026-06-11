@@ -30,6 +30,9 @@ members = [
     "tests",
 ]
 
+[workspace.package]
+edition = "2024"
+
 [profile.dev]
 opt-level = 0
 debug = 1

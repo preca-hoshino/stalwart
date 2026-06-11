@@ -1,7 +1,7 @@
 [package]
 name = "managesieve"
 version = "0.1.1"
-edition = "2024"
+edition.workspace = true
 
 [dependencies]
 imap_proto = { path = "../imap-proto" }

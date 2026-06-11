@@ -8,7 +8,7 @@ keywords = ["smtp", "email", "mail", "server"]
 categories = ["email"]
 license = "AGPL-3.0-only OR LicenseRef-SEL"
 version = "0.1.1"
-edition = "2024"
+edition.workspace = true
 
 [dependencies]
 store = { path =  "../store" }

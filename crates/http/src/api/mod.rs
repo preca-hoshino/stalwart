@@ -28,6 +28,8 @@ use http_proto::{
     HttpRequest, HttpResponse, HttpSessionData, ToHttpResponse,
     request::{decode_path_element, fetch_body},
 };
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use hyper::{
     Method, StatusCode,
     header::{self, CONTENT_ENCODING},
@@ -96,12 +98,21 @@ impl ManagementApi for Server {
                 // Authenticate request
                 let (_in_flight, access_token) = self.authenticate_headers(req, session).await?;
                 static SCHEMA_JSON: &[u8] =
-                    include_bytes!("../../../../resources/schema/schema.json.gz");
+                    include_bytes!("../../../../resources/schema/schema.json");
                 const SCHEMA_HASH: &str =
                     include_str!("../../../../resources/schema/schema.json.sha256");
 
                 if path.get(1).is_some_and(|hash| hash == &SCHEMA_HASH) {
-                    Ok(Resource::new("application/json", SCHEMA_JSON.to_vec())
+                    let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+                    std::io::Write::write_all(&mut encoder, SCHEMA_JSON)
+                        .map_err(|e| trc::ResourceEvent::Error
+                            .reason(e)
+                            .caused_by(trc::location!()))?;
+                    let compressed = encoder.finish()
+                        .map_err(|e| trc::ResourceEvent::Error
+                            .reason(e)
+                            .caused_by(trc::location!()))?;
+                    Ok(Resource::new("application/json", compressed)
                         .into_http_response()
                         .with_immutable_cache()
                         .with_header(CONTENT_ENCODING, "gzip"))

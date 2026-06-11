@@ -330,7 +330,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GHCR_PAT }}
 
       - name: Retry GHCR Login (1/2)
         id: ghcr-login-m-r1
@@ -340,7 +340,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GHCR_PAT }}
 
       - name: Retry GHCR Login (2/2)
         if: steps.ghcr-login-m-r1.outcome == 'failure'
@@ -348,7 +348,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GHCR_PAT }}
 
       - name: Download ${{ matrix.variant }} meta bake definition
         uses: actions/download-artifact@v5

@@ -351,13 +351,13 @@ jobs:
           password: ${{ secrets.GHCR_PAT }}
 
       - name: Download ${{ matrix.variant }} meta bake definition
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: bake-meta-${{ matrix.variant }}
           path: ${{ runner.temp }}/${{ matrix.variant }}
 
       - name: Download ${{ matrix.variant }} digests
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           path: ${{ runner.temp }}/${{ matrix.variant }}/digests
           pattern: digests-${{ matrix.variant }}-*
@@ -399,7 +399,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Download Artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           path: archive
           pattern: artifact-*

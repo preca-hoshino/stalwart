@@ -139,7 +139,7 @@ jobs:
           echo "checksum=$(yq -p toml -oy '.package[] | select((.source | contains("")) or (.checksum | contains("")))' Cargo.lock | sha256sum | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
       - name: Cache Cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         id: cargo-cache
         with:
           path: |
@@ -243,7 +243,7 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache Cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -284,7 +284,7 @@ jobs:
         uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Cache Cargo
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
